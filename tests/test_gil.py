@@ -20,8 +20,11 @@ from pyhdiff import _native
 
 pytestmark = pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs two CPUs")
 
-MIN_CALL_SECONDS = 0.1
-MIN_FRACTION = 0.3
+# Each call must far outlast the 5 ms switch interval: a GIL-holding call then
+# leaves the spin thread at most one interval per call, about 20 % of its rate.
+MIN_CALL_SECONDS = 0.02
+MEASURE_SECONDS = 0.3
+MIN_FRACTION = 0.5
 HDIFF = (6, 19, 23, 1024, 262144, 1, 0)
 HDIFF_FAST = (6, 1, 23, 0, 262144, 1, 0)
 ZSTD19 = (19, 0, 0, 1, 1, 0, 0, 0, 0)
@@ -44,13 +47,16 @@ def spin_fraction(call):
         time.sleep(0.2)
         idle_rate = (count - start_count) / (time.perf_counter() - start)
         start_count, start = count, time.perf_counter()
-        call()
-        elapsed = time.perf_counter() - start
-        busy_rate = (count - start_count) / elapsed
+        shortest = float("inf")
+        while time.perf_counter() - start < MEASURE_SECONDS:
+            began = time.perf_counter()
+            call()
+            shortest = min(shortest, time.perf_counter() - began)
+        busy_rate = (count - start_count) / (time.perf_counter() - start)
     finally:
         stop.set()
         thread.join()
-    assert elapsed >= MIN_CALL_SECONDS, f"workload too short to judge: {elapsed:.3f} s"
+    assert shortest >= MIN_CALL_SECONDS, f"workload too short to judge: {shortest:.3f} s"
     return busy_rate / idle_rate
 
 
