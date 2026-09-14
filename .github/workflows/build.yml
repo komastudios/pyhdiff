@@ -1,0 +1,121 @@
+# Reusable wheel build. Called by ci.yml and release.yml.
+#
+# Runs in a digest-pinned python:3.12-slim-bookworm container: the official
+# LLVM 23.1.1 compiler needs glibc 2.34 and GLIBCXX_3.4.30, which the
+# manylinux_2_28 image lacks. Debian packages come from the image's own
+# snapshot and Python build tools are hash-pinned, so a rebuild from the same
+# commit sees the same inputs.
+#
+# toolchain: official clang plus private hardened libc++/libc++abi/libunwind,
+#            built by scripts/toolchain.py. Cached only when `cache` is true;
+#            releases build it from scratch.
+# native:    fault injection, exception containment and hardening traps.
+# wheel:     the cp312-abi3 manylinux_2_34 wheel, its ELF audit, and its digest.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to build
+        type: string
+        required: true
+      artifact:
+        description: Name of the uploaded wheel artifact
+        type: string
+        default: wheel
+      cache:
+        description: Reuse a cached toolchain
+        type: boolean
+        default: true
+      sanitize:
+        description: Also run the native checks under ASan and UBSan
+        type: boolean
+        default: false
+    outputs:
+      sha256:
+        description: SHA-256 of the built wheel
+        value: ${{ jobs.wheel.outputs.sha256 }}
+
+permissions:
+  contents: read
+
+env:
+  TOOLCHAIN: /opt/pyhdiff-toolchain
+
+jobs:
+  wheel:
+    name: wheel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+    outputs:
+      sha256: ${{ steps.wheel.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Prepare the build container
+        run: scripts/container-setup.sh build
+
+      # Again, now that git is installed: the first checkout had no .git, and the
+      # wheel takes SOURCE_DATE_EPOCH from the commit.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Restore the toolchain
+        if: inputs.cache
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TOOLCHAIN }}
+          key: toolchain-${{ hashFiles('scripts/toolchain.py', 'scripts/container-setup.sh', 'requirements/build.txt') }}-${{ inputs.sanitize }}
+
+      - name: Build the toolchain
+        run: |
+          set -eu
+          modes="--mode extensive"
+          if [ "${{ inputs.sanitize }}" = "true" ]; then modes="$modes --mode debug"; fi
+          start=$(date +%s)
+          python scripts/toolchain.py --prefix "$TOOLCHAIN" $modes
+          echo "toolchain ready in $(( $(date +%s) - start )) s" | tee -a "$GITHUB_STEP_SUMMARY"
+          # The download cache is not needed after extraction.
+          rm -rf "$TOOLCHAIN/downloads"
+
+      - name: Native checks
+        run: python scripts/native_checks.py --toolchain "$TOOLCHAIN"
+
+      - name: Native checks under sanitizers
+        if: inputs.sanitize
+        run: python scripts/native_checks.py --toolchain "$TOOLCHAIN" --sanitize
+
+      - name: Build the wheel
+        id: wheel
+        run: |
+          set -eu
+          python scripts/wheel.py --toolchain "$TOOLCHAIN" --out dist | tee wheel.txt
+          sha256="$(tail -n1 wheel.txt | cut -d' ' -f1)"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "wheel: \`$(tail -n1 wheel.txt)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit the installed extension
+        env:
+          PYHDIFF_REQUIRE_ELF_AUDIT: '1'
+        run: |
+          set -eu
+          python -m venv /tmp/audit
+          /tmp/audit/bin/pip install --no-deps dist/*.whl
+          /tmp/audit/bin/pip install --require-hashes --only-binary :all: -r requirements/test.txt
+          cd tests && /tmp/audit/bin/python -m pytest -p no:cacheprovider -q test_elf.py
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 14

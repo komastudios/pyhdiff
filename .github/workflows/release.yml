@@ -1,0 +1,345 @@
+# Wheel releases.
+#
+#   prepare ─ build ┬ test ─┬ package ─ publish
+#             rebuild ──────┘
+#
+# prepare: resolve the version, tag and commit; refuse to go further if the
+#          version disagrees with pyproject.toml, the tag points at another
+#          commit, or any earlier release lacks its golden corpus.
+# build:   the wheel, from scratch: no cached toolchain.
+# rebuild: the same, independently. package fails unless both digests match.
+# test:    the full suite against the built wheel on Debian trixie CPython,
+#          including every earlier release's golden corpus. No override.
+# package: compare the two builds, generate this release's golden corpus with
+#          the built wheel, write SHA256SUMS, a digests JSON and the notes.
+#          Runs on every trigger, so a dry run exercises everything but upload.
+# publish: a single `gh release create`. No checkout, no build tools, no
+#          third-party action — it is the only job holding contents: write.
+#
+# Releases are cut for an explicitly chosen commit: either a pushed v*.*.* tag,
+# or a manual dispatch naming a ref and version. Nothing publishes automatically.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, e.g. 0.1.0 (empty = read from pyproject.toml)
+        type: string
+        default: ''
+      ref:
+        description: Commit SHA or branch to build (empty = the ref selected above)
+        type: string
+        default: ''
+      dry_run:
+        description: Build, test and package but do not publish a release
+        type: boolean
+        default: true
+
+# contents stays read for the whole workflow; only the job that cuts the release
+# gets write, so a compromised build stage cannot push to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: resolve version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      tag_exists: ${{ steps.resolve.outputs.tag_exists }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # On a tag push `inputs` is null, so this falls through to github.ref.
+          ref: ${{ inputs.ref || github.ref }}
+          # Needed to resolve an existing tag, and to accept a bare SHA input.
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - id: resolve
+        env:
+          IN_VERSION: ${{ inputs.version }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          PROJECT_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          [ -n "$PROJECT_VERSION" ] || {
+            echo "::error::could not read the project version from pyproject.toml"; exit 1; }
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"; VERSION="${TAG#v}"; SOURCE="tag $TAG"
+          else
+            VERSION="${IN_VERSION:-$PROJECT_VERSION}"; TAG="v$VERSION"; SOURCE="dispatch input"
+          fi
+
+          # The wheel carries the pyproject.toml version in its name and metadata;
+          # a release naming anything else would contradict it.
+          if [ "$VERSION" != "$PROJECT_VERSION" ]; then
+            echo "::error::$SOURCE says $VERSION but pyproject.toml says $PROJECT_VERSION"
+            exit 1
+          fi
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::version '$VERSION' is not X.Y.Z"; exit 1 ;;
+          esac
+
+          # Test the event first: on a tag push IN_DRY_RUN is empty, never 'false'.
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            PUBLISH=true
+          elif [ "${IN_DRY_RUN:-}" = "false" ]; then
+            PUBLISH=true
+          else
+            PUBLISH=false
+          fi
+
+          SHA="$(git rev-parse HEAD)"
+
+          # `gh release create --target` is silently ignored when the tag already
+          # exists, so a tag pointing elsewhere would attach these wheels to a
+          # different commit without any error. Refuse instead.
+          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
+            TAG_EXISTS=true
+            TAG_SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
+            if [ "$TAG_SHA" != "$SHA" ]; then
+              echo "::error::tag $TAG is at $TAG_SHA but this run builds $SHA"
+              exit 1
+            fi
+          else
+            TAG_EXISTS=false
+          fi
+
+          { echo "version=$VERSION"; echo "tag=$TAG"; echo "sha=$SHA"
+            echo "publish=$PUBLISH"; echo "tag_exists=$TAG_EXISTS"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Require the golden corpus of every earlier release
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: python3 scripts/golden.py check-complete --except "$TAG"
+
+      - id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Pin gh to this repository so it can never resolve to another one.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          PUBLISH: ${{ steps.resolve.outputs.publish }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then EXISTS=true; else EXISTS=false; fi
+          echo "release_exists=$EXISTS" | tee -a "$GITHUB_OUTPUT"
+          if [ "$EXISTS" = "true" ] && [ "$PUBLISH" = "true" ]; then
+            echo "::error::release $TAG already exists; delete it or re-run with dry_run=true"
+            exit 1
+          fi
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          PUBLISH: ${{ steps.resolve.outputs.publish }}
+          TAG_EXISTS: ${{ steps.resolve.outputs.tag_exists }}
+        run: |
+          {
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| version | \`$VERSION\` |"
+            echo "| tag | \`$TAG\` (exists: $TAG_EXISTS) |"
+            echo "| commit | \`$SHA\` |"
+            echo "| publish | $PUBLISH |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+      artifact: wheel
+      cache: false
+
+  rebuild:
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+      artifact: wheel-rebuild
+      cache: false
+
+  test:
+    needs: [prepare, build]
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+      artifact: wheel
+
+  package:
+    name: package and checksum
+    needs: [prepare, build, rebuild, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: python:3.12-slim-trixie@sha256:2fe5997d249a808b8eeea52c58a1dbffbba28754dc11699ef5c029f2d818ce79
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-rebuild
+          path: rebuild
+
+      - name: Require reproducible wheels
+        env:
+          BUILD_SHA256: ${{ needs.build.outputs.sha256 }}
+          REBUILD_SHA256: ${{ needs.rebuild.outputs.sha256 }}
+        run: |
+          set -eu
+          ls -l dist rebuild
+          [ "$(ls dist | wc -l)" -eq 1 ] || { echo "::error::expected exactly one wheel"; exit 1; }
+          cmp dist/*.whl rebuild/*.whl || {
+            echo "::error::independent builds differ: $BUILD_SHA256 vs $REBUILD_SHA256"; exit 1; }
+          echo "reproducible: \`$BUILD_SHA256\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Golden corpus of this release
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -eu
+          python -m pip install --no-deps --no-index dist/*.whl
+          python scripts/golden.py generate --out golden
+          python scripts/golden.py pack golden "dist/pyhdiff-$VERSION-golden.tar.gz"
+
+      - name: Checksums and digests
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -eu
+          # Hashed from inside dist so the manifest lists bare filenames, and
+          # written outside it first so it cannot hash itself.
+          ( cd dist && find . -maxdepth 1 -type f -printf '%f\n' \
+              | LC_ALL=C sort | xargs sha256sum ) > SHA256SUMS
+          python - <<'EOF'
+          import json, os
+          env = os.environ
+          base = f"{env['GITHUB_SERVER_URL']}/{env['GITHUB_REPOSITORY']}/releases/download/{env['TAG']}"
+          assets = [{"name": name, "url": f"{base}/{name}", "sha256": digest}
+                    for digest, name in (line.split() for line in open("SHA256SUMS"))]
+          with open(f"dist/pyhdiff-{env['VERSION']}-digests.json", "w") as out:
+              json.dump({"version": env["VERSION"], "tag": env["TAG"], "commit": env["SHA"],
+                         "assets": assets}, out, indent=2)
+              out.write("\n")
+          EOF
+          mv SHA256SUMS dist/
+          cat dist/SHA256SUMS
+
+      - name: Release notes
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -eu
+          WHEEL="$(cd dist && ls pyhdiff-*.whl)"
+          URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$WHEEL"
+          DIGEST="$(cd dist && sha256sum "$WHEEL" | cut -d' ' -f1)"
+          {
+            echo "pyhdiff $VERSION: HDiffPatch deltas and zstd frames with a verified envelope."
+            echo
+            echo '## Install'
+            echo
+            echo 'One self-contained wheel for CPython 3.12 and newer on x86-64 Linux with'
+            echo 'glibc 2.34 or newer. HDiffPatch, zstd and a hardened libc++ are linked'
+            echo 'statically; the extension needs nothing beyond glibc.'
+            echo
+            echo '```sh'
+            echo "pip install '$URL' --hash=sha256:$DIGEST  # in a requirements file"
+            echo "uv add '$URL'  # uv.lock records the sha256"
+            echo '```'
+            echo
+            echo '## Compatibility'
+            echo
+            echo 'Envelope format version 1. This release applies every envelope and frame'
+            echo 'produced by earlier releases; its own golden corpus is attached.'
+            echo
+            echo '## SHA256'
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo
+            echo "Machine-readable: \`pyhdiff-$VERSION-digests.json\`. Built reproducibly from \`$SHA\`"
+            echo "by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID);"
+            echo 'two independent builds from scratch produced identical bytes.'
+          } > dist/notes.md
+          cat dist/notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: dist
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish release
+    needs: [prepare, package]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          TAG_EXISTS: ${{ needs.prepare.outputs.tag_exists }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; not republishing" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          args=( "$TAG" --title "$TAG" --notes-file dist/notes.md )
+          if [ "$TAG_EXISTS" = "true" ]; then
+            # Tag-push path: the tag is already there and --target would be ignored.
+            args+=( --verify-tag )
+          else
+            # Dispatch path: gh creates the tag at exactly the commit we built.
+            args+=( --target "$SHA" )
+          fi
+          # Explicit globs: a bare dist/* would upload notes.md as an asset.
+          gh release create "${args[@]}" dist/pyhdiff-*.whl dist/pyhdiff-*-golden.tar.gz \
+            dist/pyhdiff-*-digests.json dist/SHA256SUMS
+          echo "published $TAG" | tee -a "$GITHUB_STEP_SUMMARY"

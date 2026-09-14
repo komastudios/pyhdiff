@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core==1.0.3"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pyhdiff"
+version = "0.1.0"
+description = "HDiffPatch deltas and zstd frames with a verified envelope"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Koma Studios" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Archiving :: Compression",
+]
+
+[project.urls]
+Homepage = "https://github.com/komastudios/pyhdiff"
+Releases = "https://github.com/komastudios/pyhdiff/releases"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+cmake.version = ">=3.30"
+cmake.build-type = "Release"
+cmake.define.CMAKE_TOOLCHAIN_FILE = "cmake/toolchain.cmake"
+wheel.py-api = "cp312"
+wheel.packages = ["src/pyhdiff"]
+wheel.exclude = ["pyhdiff/_native.c"]
+install.components = ["python"]
+sdist.exclude = ["build", "dist", ".github", "tests/vectors/large"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: large inputs; deselect with -m 'not slow'"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

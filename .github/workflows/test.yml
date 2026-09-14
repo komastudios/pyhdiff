@@ -1,0 +1,56 @@
+# Reusable wheel test. Installs the built wheel, never the source tree, into
+# a Debian trixie CPython image (python:*-slim-trixie) and runs the full suite:
+# envelopes, frames, GIL release, concurrency, reference vectors, golden corpus
+# and zstd CLI interoperability.
+name: test
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      artifact:
+        type: string
+        default: wheel
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.12'
+            image: python:3.12-slim-trixie@sha256:2fe5997d249a808b8eeea52c58a1dbffbba28754dc11699ef5c029f2d818ce79
+          - python: '3.13'
+            image: python:3.13-slim-trixie@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Prepare the test container
+        run: scripts/container-setup.sh test
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+
+      - name: Install the wheel
+        run: python -m pip install --no-deps --no-index dist/*.whl
+
+      - name: Test
+        env:
+          PYHDIFF_REQUIRE_ZSTD_CLI: '1'
+        # From tests/, so only the installed package is importable.
+        run: cd tests && python -m pytest -p no:cacheprovider -ra
