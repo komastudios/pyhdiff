@@ -52,7 +52,7 @@ is synthetic.
 | Reference bytes: 63 vectors (9 input pairs up to 12 MiB, 7 profiles) reproduce the reference encoder's envelope bytes 4..end and payload exactly, and apply | `test_vectors.py` |
 | Envelope layout, inspect, every truncation, extension, mutated header fields, wrong base by length and by hash, tampered target hash and length, output limit, payload mutations, option errors, input types | `test_envelope.py` |
 | zstd frames: levels 1–22, hard bound with and without content size, forged content size above and just below the bound (no memory committed), content size smaller and larger than the data, legacy magic, dictionary frames, exact bound followed by skippable and empty frames, concatenation, corruption, zstd CLI interoperability in both directions | `test_frames.py` |
-| GIL released during every native entry point and every public codec function, with a control that the measurement fails a GIL-holding call | `test_gil.py` |
+| GIL released by every native entry point, checked deterministically without timing: with an effectively infinite switch interval a helper thread can only advance while the GIL is explicitly released; a control confirms a GIL-holding C call leaves it exactly unchanged | `test_gil.py` |
 | Parallel encodes from eight threads equal serial results | `test_concurrency.py` |
 | Every earlier release's golden corpus applies | `test_golden.py` |
 
