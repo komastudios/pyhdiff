@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A native allocation failure raises `pyhdiff.AllocationError`, a subclass of
+  both `pyhdiff.Error` and `MemoryError`, instead of a plain `MemoryError`, so
+  that catching `pyhdiff.Error` covers every codec failure.
+- README: the exception hierarchy is documented exactly; `pyhdiff.Error` is not
+  a `ValueError`.
+
 ## [0.1.0]
 
 First release.

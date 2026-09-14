@@ -154,3 +154,26 @@ def test_raw_payloads():
     assert raw.hdiff_apply(BASE, payload, len(TARGET)) == TARGET
     with pytest.raises(pyhdiff.DecodeError):
         raw.hdiff_apply(BASE, payload, len(TARGET) + 1)
+
+
+def test_exception_hierarchy():
+    # Documented in the README; callers catch pyhdiff.Error for every codec failure.
+    refusals = [pyhdiff.EnvelopeError, pyhdiff.BaseMismatchError, pyhdiff.DecodeError,
+                pyhdiff.IntegrityError, pyhdiff.LimitError, pyhdiff.OptionError]
+    assert not issubclass(pyhdiff.Error, ValueError)
+    for error in refusals:
+        assert issubclass(error, pyhdiff.Error) and issubclass(error, ValueError)
+    assert issubclass(pyhdiff.NativeError, pyhdiff.Error)
+    assert issubclass(pyhdiff.NativeError, RuntimeError)
+    assert not issubclass(pyhdiff.NativeError, ValueError)
+    assert issubclass(pyhdiff.AllocationError, pyhdiff.Error)
+    assert issubclass(pyhdiff.AllocationError, MemoryError)
+    assert not issubclass(pyhdiff.AllocationError, ValueError)
+    for status, error in [(pyhdiff._native.STATUS_ALLOC, pyhdiff.AllocationError),
+                          (pyhdiff._native.STATUS_EXCEPTION, pyhdiff.NativeError),
+                          (pyhdiff._native.STATUS_UNKNOWN, pyhdiff.NativeError),
+                          (pyhdiff._native.STATUS_LIMIT, pyhdiff.LimitError),
+                          (pyhdiff._native.STATUS_INVALID, pyhdiff.DecodeError),
+                          (pyhdiff._native.STATUS_OPTION, pyhdiff.OptionError)]:
+        with pytest.raises(error):
+            pyhdiff._raise(status, decoding=True)

@@ -71,8 +71,19 @@ differs from the recorded base in length or SHA-256. Applying a delta to the
 wrong base is otherwise a silent corruption. It raises `IntegrityError` if
 the reconstruction differs from the recorded target. `EnvelopeError`,
 `DecodeError`, `LimitError` and `OptionError` cover malformed envelopes,
-malformed payloads, size limits and profile values out of range. All of
-these exceptions derive from `pyhdiff.Error` and `ValueError`.
+malformed payloads, size limits and profile values out of range.
+
+Catch `pyhdiff.Error`: every failure of a codec call derives from it.
+`pyhdiff.Error` itself is not a `ValueError`. The subclasses also derive from
+the matching built-in, so `except ValueError` catches only part of them:
+
+| Exception | Also derives from | Meaning |
+| --- | --- | --- |
+| `EnvelopeError`, `BaseMismatchError`, `DecodeError`, `IntegrityError`, `LimitError`, `OptionError` | `ValueError` | The input was refused |
+| `NativeError` | `RuntimeError` | The codec raised internally; the exception was contained |
+| `AllocationError` | `MemoryError` | The codec could not allocate memory |
+
+Passing something that is not bytes-like raises a plain `TypeError`.
 
 Inputs can be any bytes-like object. Objects other than `bytes` are copied
 once, because the codecs run without the GIL and must not see memory that

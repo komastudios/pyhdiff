@@ -27,6 +27,7 @@ from typing import Literal
 from . import _native
 
 __all__ = [
+    "AllocationError",
     "BaseMismatchError",
     "Codec",
     "DecodeError",
@@ -104,6 +105,10 @@ class NativeError(Error, RuntimeError):
     """The native codec raised an internal exception; it was contained."""
 
 
+class AllocationError(Error, MemoryError):
+    """The native codec could not allocate memory; nothing was leaked."""
+
+
 class Codec(enum.IntEnum):
     HDIFF = 1
     ZSTD = 2
@@ -175,7 +180,7 @@ def _raise(code: int, decoding: bool) -> None:
     if code == _native.STATUS_OPTION:
         raise OptionError("profile parameter out of range")
     if code == _native.STATUS_ALLOC:
-        raise MemoryError("native allocation failed")
+        raise AllocationError("native allocation failed")
     if code == _native.STATUS_INVALID:
         raise DecodeError("malformed payload")
     if code >= _native.STATUS_ZSTD_ERROR_BASE:
