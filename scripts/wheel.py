@@ -88,12 +88,15 @@ def main():
         (built,) = Path(raw).glob("*.whl")
         if policy(built, env) > 34:
             raise SystemExit("the extension needs a newer glibc than manylinux_2_34 allows")
-        for stale in a.out.glob("pyhdiff-*.whl"):
+        for stale in (*a.out.glob("pyhdiff-*.whl"), *a.out.glob("pyhdiff-*.debug")):
             stale.unlink()
         retag(built, a.out)
     (wheel,) = a.out.glob(f"pyhdiff-*-cp312-abi3-{PLATFORM}.whl")
-    with wheel.open("rb") as f:
-        print(f"{hashlib.file_digest(f, 'sha256').hexdigest()}  {wheel.name}")
+    (debug,) = (ROOT / "build").glob("*/_native.debug")
+    shutil.copyfile(debug, a.out / wheel.name.replace(".whl", ".debug"))
+    for path in (a.out / wheel.name.replace(".whl", ".debug"), wheel):
+        with path.open("rb") as f:
+            print(f"{hashlib.file_digest(f, 'sha256').hexdigest()}  {path.name}")
 
 
 if __name__ == "__main__":

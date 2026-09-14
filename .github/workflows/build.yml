@@ -111,11 +111,17 @@ jobs:
           python -m venv /tmp/audit
           /tmp/audit/bin/pip install --no-deps dist/*.whl
           /tmp/audit/bin/pip install --require-hashes --only-binary :all: -r requirements/test.txt
-          cd tests && /tmp/audit/bin/python -m pytest -p no:cacheprovider -q test_elf.py
+          # A module on the system libstdc++, for the runtime coexistence test.
+          "$TOOLCHAIN/llvm/bin/clang++" -shared -fPIC -O2 tests/native/std_probe.cpp -o /tmp/std_probe.so
+          cd tests && PYHDIFF_STDCXX_PROBE=/tmp/std_probe.so \
+            /tmp/audit/bin/python -m pytest -p no:cacheprovider -q test_elf.py test_mixed_runtime.py
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact }}
-          path: dist/*.whl
+          # The wheel, and the debug information stripped from its extension.
+          path: |
+            dist/*.whl
+            dist/*.debug
           if-no-files-found: error
           retention-days: 14

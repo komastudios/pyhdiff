@@ -216,9 +216,11 @@ jobs:
         run: |
           set -eu
           ls -l dist rebuild
-          [ "$(ls dist | wc -l)" -eq 1 ] || { echo "::error::expected exactly one wheel"; exit 1; }
-          cmp dist/*.whl rebuild/*.whl || {
-            echo "::error::independent builds differ: $BUILD_SHA256 vs $REBUILD_SHA256"; exit 1; }
+          [ "$(find dist -name '*.whl' | wc -l)" -eq 1 ] || { echo "::error::expected exactly one wheel"; exit 1; }
+          for kind in whl debug; do
+            cmp dist/*.$kind rebuild/*.$kind || {
+              echo "::error::independent builds differ ($kind): $BUILD_SHA256 vs $REBUILD_SHA256"; exit 1; }
+          done
           echo "reproducible: \`$BUILD_SHA256\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Golden corpus of this release
@@ -262,7 +264,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -eu
-          WHEEL="$(cd dist && ls pyhdiff-*.whl)"
+          WHEEL="$(basename dist/pyhdiff-*.whl)"
           URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$WHEEL"
           DIGEST="$(cd dist && sha256sum "$WHEEL" | cut -d' ' -f1)"
           {
@@ -289,6 +291,9 @@ jobs:
             echo '```'
             cat dist/SHA256SUMS
             echo '```'
+            echo
+            echo 'The `.debug` asset holds the extension'"'"'s debug information (matched by build ID) for'
+            echo 'symbolizing a crash report; it is not needed to run pyhdiff.'
             echo
             echo "Machine-readable: \`pyhdiff-$VERSION-digests.json\`. Built reproducibly from \`$SHA\`"
             echo "by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID);"
@@ -340,6 +345,6 @@ jobs:
             args+=( --target "$SHA" )
           fi
           # Explicit globs: a bare dist/* would upload notes.md as an asset.
-          gh release create "${args[@]}" dist/pyhdiff-*.whl dist/pyhdiff-*-golden.tar.gz \
+          gh release create "${args[@]}" dist/pyhdiff-*.whl dist/pyhdiff-*.debug dist/pyhdiff-*-golden.tar.gz \
             dist/pyhdiff-*-digests.json dist/SHA256SUMS
           echo "published $TAG" | tee -a "$GITHUB_STEP_SUMMARY"

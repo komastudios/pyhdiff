@@ -91,12 +91,50 @@ struct Free {
     void operator()(unsigned char *p) const noexcept { std::free(p); }
 };
 using Owned = std::unique_ptr<unsigned char, Free>;
-Owned allocate(size_t n) {
-    Owned p(static_cast<unsigned char *>(std::malloc(std::max(n, size_t{1}))));
-    if (!p)
-        throw std::bad_alloc();
-    return p;
-}
+/* malloc storage that grows without zero-filling, so reserved pages are only
+ * committed when written, and that transfers to the caller without a copy. */
+class Growable {
+  public:
+    explicit Growable(size_t reserve = 0) {
+        if (reserve)
+            grow_to(reserve);
+    }
+    size_t size() const noexcept { return size_; }
+    Mutable bytes() noexcept { return borrowed(data_.get(), size_); }
+    // Uninitialized storage past size(), at least `minimum` bytes of it.
+    Mutable spare(size_t minimum) {
+        if (capacity_ - size_ < minimum)
+            grow_to(std::max(size_ + minimum, capacity_ + capacity_ / 2));
+        return borrowed(data_.get(), capacity_).subspan(size_);
+    }
+    // Callers overwrite every byte between the old and the new size.
+    void resize(size_t n) {
+        if (n > size_)
+            spare(n - size_);
+        size_ = n;
+    }
+    void append(Bytes b) {
+        std::ranges::copy(b, spare(b.size()).begin());
+        size_ += b.size();
+    }
+    phd_result release() {
+        if (!data_)
+            grow_to(1);
+        return {data_.release(), size_, PHD_OK};
+    }
+
+  private:
+    void grow_to(size_t n) {
+        auto *p = static_cast<unsigned char *>(std::realloc(data_.get(), n));
+        if (!p)
+            throw std::bad_alloc();
+        (void)data_.release();
+        data_.reset(p);
+        capacity_ = n;
+    }
+    Owned data_;
+    size_t size_ = 0, capacity_ = 0;
+};
 template <class F> phd_result boundary(F f) noexcept {
     try {
         return f();
@@ -130,7 +168,7 @@ struct Input {
 };
 struct Output {
     hpatch_TStreamOutput stream{};
-    std::vector<unsigned char> bytes;
+    Growable bytes;
     explicit Output(size_t limit) {
         stream.streamImport = this;
         stream.streamSize = limit;
@@ -145,7 +183,7 @@ struct Output {
             size_t finish = static_cast<size_t>(pos) + src.size();
             if (finish > self.bytes.size())
                 self.bytes.resize(finish);
-            auto dst = Mutable(self.bytes)
+            auto dst = self.bytes.bytes()
                            .subspan(static_cast<size_t>(pos), src.size());
             std::copy(src.begin(), src.end(), dst.begin());
             return hpatch_TRUE;
@@ -293,7 +331,7 @@ struct Decompress {
 static_assert(std::is_standard_layout_v<Decompress>);
 
 template <class Invoke>
-std::vector<unsigned char> hdiff_encode(Bytes base, Bytes target,
+Growable hdiff_encode(Bytes base, Bytes target,
                                         const Options &options, Invoke invoke) {
     require(base.size() <= PHD_RAW_MAX && target.size() <= PHD_RAW_MAX,
             PHD_LIMIT);
@@ -340,7 +378,7 @@ struct Limits {
 };
 constexpr Limits kCodecLimits{PHD_RAW_MAX, PHD_PAYLOAD_MAX};
 constexpr Limits kFrameLimits{PHD_FRAME_MAX, PHD_FRAME_MAX};
-std::vector<unsigned char> zstd_encode(Bytes base, Bytes target,
+Growable zstd_encode(Bytes base, Bytes target,
                                        const Options &o, Limits limits,
                                        Cancel cancel, void *opaque) {
     size_t bn = base.size(), tn = target.size();
@@ -387,7 +425,7 @@ std::vector<unsigned char> zstd_encode(Bytes base, Bytes target,
     zcheck(ZSTD_CCtx_setPledgedSrcSize(ctx.get(), tn));
     zcheck(ZSTD_CCtx_refPrefix(ctx.get(), base.data(), bn));
     std::array<unsigned char, 65536> buffer{};
-    std::vector<unsigned char> encoded;
+    Growable encoded;
     size_t pos = 0, remaining;
     do {
         auto chunk = target.subspan(pos, std::min(size_t{65536}, tn - pos));
@@ -400,8 +438,7 @@ std::vector<unsigned char> zstd_encode(Bytes base, Bytes target,
                 last ? ZSTD_e_end : ZSTD_e_continue);
             zcheck(remaining);
             require(ob.pos <= limits.output - encoded.size(), PHD_LIMIT);
-            auto part = Bytes(buffer).first(ob.pos);
-            encoded.insert(encoded.end(), part.begin(), part.end());
+            encoded.append(Bytes(buffer).first(ob.pos));
         } while (last ? remaining != 0 : ib.pos != ib.size);
         pos += chunk.size();
     } while (pos != tn);
@@ -440,60 +477,52 @@ void zstd_apply(Bytes base, Bytes src, Mutable dst, Cancel cancel,
     require(read == dn && written == tn);
 }
 
-std::vector<unsigned char> frame_decompress(Bytes src, size_t max_output) {
+Growable frame_decompress(Bytes src, size_t max_output) {
     require(src.size() <= PHD_FRAME_MAX && max_output <= PHD_FRAME_MAX,
             PHD_LIMIT);
     require(!src.empty());
     Decoder ctx(ZSTD_createDCtx(), ZSTD_freeDCtx);
     if (!ctx) throw std::bad_alloc();
     // Refuse windows beyond what the output bound needs, except for the
-    // windows that ordinary level settings choose for small inputs.
+    // 8 MiB windows that ordinary streaming compressors choose.
     int window = 10;
     while (window < PHD_ZSTD_WINDOW_LOG_MAX && (size_t{1} << window) < max_output)
         ++window;
     zcheck(ZSTD_DCtx_setParameter(ctx.get(), ZSTD_d_windowLogMax,
-                                  std::max(window, 27)));
+                                  std::max(window, 23)));
+    // A claimed content size within the bound reserves address space only:
+    // pages are committed as blocks decode, so a forged header costs nothing.
+    // With room for the whole frame, zstd also decodes without its own buffer.
     auto claimed = ZSTD_getFrameContentSize(src.data(), src.size());
-    size_t capacity = claimed < max_output ? static_cast<size_t>(claimed)
-                                           : std::min(max_output, size_t{65536});
-    std::vector<unsigned char> out(capacity);
+    Growable out(claimed <= max_output ? static_cast<size_t>(claimed)
+                                       : std::min(max_output, size_t{65536}));
     ZSTD_inBuffer ib{src.data(), src.size(), 0};
-    size_t written = 0;
     while (true) {
-        if (written == out.size()) {
-            if (out.size() == max_output) {
-                // Full at the bound: any further output exceeds it.
-                unsigned char extra = 0;
-                ZSTD_outBuffer ob{&extra, 1, 0};
-                size_t before = ib.pos;
-                size_t r = ZSTD_decompressStream(ctx.get(), &ob, &ib);
-                zcheck(r);
-                require(ob.pos == 0, PHD_LIMIT);
-                if (r == 0 && ib.pos == ib.size)
-                    break;
-                require(ib.pos != before);
-                continue;
-            }
-            out.resize(std::min(max_output, std::max(out.size() * 2, size_t{65536})));
+        if (out.size() == max_output) {
+            // Full at the bound: any further output exceeds it.
+            unsigned char extra = 0;
+            ZSTD_outBuffer ob{&extra, 1, 0};
+            size_t before = ib.pos;
+            size_t r = ZSTD_decompressStream(ctx.get(), &ob, &ib);
+            zcheck(r);
+            require(ob.pos == 0, PHD_LIMIT);
+            if (r == 0 && ib.pos == ib.size)
+                break;
+            require(ib.pos != before);
+            continue;
         }
-        auto dst = Mutable(out).subspan(written);
+        auto dst = out.spare(std::min(max_output - out.size(), size_t{65536}));
+        dst = dst.first(std::min(dst.size(), max_output - out.size()));
         ZSTD_outBuffer ob{dst.data(), dst.size(), 0};
         size_t before = ib.pos;
         size_t r = ZSTD_decompressStream(ctx.get(), &ob, &ib);
         zcheck(r);
-        written += ob.pos;
+        out.resize(out.size() + ob.pos);
         if (r == 0 && ib.pos == ib.size)
             break;
         require(ib.pos != before || ob.pos != 0);
     }
-    out.resize(written);
     return out;
-}
-
-phd_result owned(const std::vector<unsigned char> &bytes) {
-    auto result = allocate(bytes.size());
-    std::ranges::copy(bytes, borrowed(result.get(), bytes.size()).begin());
-    return {result.release(), bytes.size(), PHD_OK};
 }
 
 // The option ranges are part of the public contract.
@@ -537,15 +566,21 @@ void inputs(const unsigned char *a, size_t an, const unsigned char *b,
             size_t bn) {
     require((a || !an) && (b || !bn), PHD_OPTION);
 }
-phd_result zstd_apply_owned(const unsigned char *base, size_t bn,
-                            const unsigned char *payload, size_t pn,
-                            size_t tn, Cancel cancel, void *opaque) {
-    inputs(base, bn, payload, pn);
-    require(tn <= PHD_RAW_MAX, PHD_LIMIT);
-    auto result = allocate(tn);
-    zstd_apply(borrowed(base, bn), borrowed(payload, pn),
-               borrowed(result.get(), tn), cancel, opaque);
-    return {result.release(), tn, PHD_OK};
+phd_status apply_into(bool zstd, const unsigned char *base, size_t bn,
+                      const unsigned char *payload, size_t pn,
+                      unsigned char *out, size_t tn, Cancel cancel,
+                      void *opaque) noexcept {
+    return boundary([&] {
+        inputs(base, bn, payload, pn);
+        require(out || !tn, PHD_OPTION);
+        require(tn <= PHD_RAW_MAX, PHD_LIMIT);
+        auto dst = borrowed(out, tn);
+        if (zstd)
+            zstd_apply(borrowed(base, bn), borrowed(payload, pn), dst, cancel, opaque);
+        else
+            hdiff_apply(borrowed(base, bn), borrowed(payload, pn), dst);
+        return phd_result{nullptr, 0, PHD_OK};
+    }).status;
 }
 } // namespace
 
@@ -555,23 +590,17 @@ extern "C" phd_result phd_hdiff_encode(const unsigned char *base, size_t bn,
     return boundary([&] {
         inputs(base, bn, target, tn);
         auto options = hdiff_options(o);
-        return owned(hdiff_encode(borrowed(base, bn), borrowed(target, tn),
-                                  options, [](auto... args) {
-                                      create_single_compressed_diff_block(args...);
-                                  }));
+        return hdiff_encode(borrowed(base, bn), borrowed(target, tn), options,
+                            [](auto... args) {
+                                create_single_compressed_diff_block(args...);
+                            })
+            .release();
     });
 }
-extern "C" phd_result phd_hdiff_apply(const unsigned char *base, size_t bn,
+extern "C" phd_status phd_hdiff_apply(const unsigned char *base, size_t bn,
                                       const unsigned char *payload, size_t pn,
-                                      size_t tn) noexcept {
-    return boundary([&] {
-        inputs(base, bn, payload, pn);
-        require(tn <= PHD_RAW_MAX, PHD_LIMIT);
-        auto result = allocate(tn);
-        hdiff_apply(borrowed(base, bn), borrowed(payload, pn),
-                    borrowed(result.get(), tn));
-        return phd_result{result.release(), tn, PHD_OK};
-    });
+                                      unsigned char *out, size_t tn) noexcept {
+    return apply_into(false, base, bn, payload, pn, out, tn, nullptr, nullptr);
 }
 extern "C" phd_result phd_zstd_encode(const unsigned char *base, size_t bn,
                                       const unsigned char *target, size_t tn,
@@ -579,15 +608,15 @@ extern "C" phd_result phd_zstd_encode(const unsigned char *base, size_t bn,
     return boundary([&] {
         inputs(base, bn, target, tn);
         auto options = zstd_options(o);
-        return owned(zstd_encode(borrowed(base, bn), borrowed(target, tn),
-                                 options, kCodecLimits, nullptr, nullptr));
+        return zstd_encode(borrowed(base, bn), borrowed(target, tn), options,
+                           kCodecLimits, nullptr, nullptr)
+            .release();
     });
 }
-extern "C" phd_result phd_zstd_apply(const unsigned char *base, size_t bn,
+extern "C" phd_status phd_zstd_apply(const unsigned char *base, size_t bn,
                                      const unsigned char *payload, size_t pn,
-                                     size_t tn) noexcept {
-    return boundary(
-        [&] { return zstd_apply_owned(base, bn, payload, pn, tn, nullptr, nullptr); });
+                                     unsigned char *out, size_t tn) noexcept {
+    return apply_into(true, base, bn, payload, pn, out, tn, nullptr, nullptr);
 }
 extern "C" phd_result phd_zstd_compress(const unsigned char *data, size_t n,
                                         int level, int window_log,
@@ -597,15 +626,16 @@ extern "C" phd_result phd_zstd_compress(const unsigned char *data, size_t n,
         const phd_zstd_options public_options{level, window_log, 0, 1,
                                               checksum, 0, 0, 0, 0};
         auto options = zstd_options(&public_options);
-        return owned(zstd_encode(Bytes{}, borrowed(data, n), options,
-                                 kFrameLimits, nullptr, nullptr));
+        return zstd_encode(Bytes{}, borrowed(data, n), options, kFrameLimits,
+                           nullptr, nullptr)
+            .release();
     });
 }
 extern "C" phd_result phd_zstd_decompress(const unsigned char *data, size_t n,
                                           size_t max_output) noexcept {
     return boundary([&] {
         inputs(data, n, data, n);
-        return owned(frame_decompress(borrowed(data, n), max_output));
+        return frame_decompress(borrowed(data, n), max_output).release();
     });
 }
 
@@ -615,15 +645,15 @@ extern "C" phd_result phd_test_zstd_encode(const unsigned char *base, size_t bn,
     phd_test_callback cancel, void *opaque) noexcept {
     return boundary([&] {
         auto options = zstd_options(o);
-        return owned(zstd_encode(borrowed(base, bn), borrowed(target, tn),
-                                 options, kCodecLimits, cancel, opaque));
+        return zstd_encode(borrowed(base, bn), borrowed(target, tn), options,
+                           kCodecLimits, cancel, opaque)
+            .release();
     });
 }
-extern "C" phd_result phd_test_zstd_apply(const unsigned char *base, size_t bn,
-    const unsigned char *payload, size_t pn, size_t tn,
+extern "C" phd_status phd_test_zstd_apply(const unsigned char *base, size_t bn,
+    const unsigned char *payload, size_t pn, unsigned char *out, size_t tn,
     phd_test_callback cancel, void *opaque) noexcept {
-    return boundary(
-        [&] { return zstd_apply_owned(base, bn, payload, pn, tn, cancel, opaque); });
+    return apply_into(true, base, bn, payload, pn, out, tn, cancel, opaque);
 }
 extern "C" phd_result phd_test_zstd_allocation() noexcept {
     return boundary([]() -> phd_result {
@@ -664,7 +694,7 @@ extern "C" phd_result phd_test_hdiff_wiring() noexcept {
 }
 extern "C" phd_result phd_test_exception(int kind) noexcept {
     return boundary([&]() -> phd_result {
-        auto memory = allocate(1024);
+        Growable memory(1024);
         if (kind == 0)
             throw std::bad_alloc();
         if (kind == 1)

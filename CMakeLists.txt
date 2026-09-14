@@ -18,10 +18,12 @@ set(PYHDIFF_HARDENING extensive CACHE STRING "libc++ hardening mode")
 if(NOT PYHDIFF_HARDENING MATCHES "^(extensive|debug)$")
   message(FATAL_ERROR "Unsupported hardening mode")
 endif()
+cmake_path(GET CMAKE_CXX_COMPILER PARENT_PATH llvm_bin)
+cmake_path(GET llvm_bin PARENT_PATH llvm_root)
 add_compile_options(-O2 -g -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection
   -ftrivial-auto-var-init=zero -fvisibility=hidden -ffunction-sections -fdata-sections
   "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=pyhdiff" "-ffile-prefix-map=${CMAKE_BINARY_DIR}=build"
-  "-ffile-prefix-map=${PYHDIFF_RUNTIME}=runtime" "-ffile-prefix-map=${CMAKE_CXX_COMPILER}=clang")
+  "-ffile-prefix-map=${PYHDIFF_RUNTIME}=runtime" "-ffile-prefix-map=${llvm_root}=llvm")
 add_compile_definitions(_IS_USED_MULTITHREAD=0)
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>"
   "$<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>"
@@ -90,9 +92,16 @@ if(SKBUILD)
   # Codec archives precede the runtime group so every C++ reference resolves inside it.
   target_link_libraries(_native PRIVATE phd_bridge phd_hdiff libzstd_static ${runtime})
   set_target_properties(_native PROPERTIES LINKER_LANGUAGE CXX)
-  # Export only the module initializer and drop symbol tables.
-  target_link_options(_native PRIVATE "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/native/exports.map"
-    -Wl,--strip-all)
+  # Export only the module initializer.
+  target_link_options(_native PRIVATE "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/native/exports.map")
+  # Ship a stripped extension; keep its debug information beside it, matched by
+  # build ID and debuglink, so a hardening trap in the field can be symbolized.
+  add_custom_command(TARGET _native POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} --only-keep-debug $<TARGET_FILE:_native> ${CMAKE_BINARY_DIR}/_native.debug
+    COMMAND ${CMAKE_OBJCOPY} --strip-all $<TARGET_FILE:_native>
+    COMMAND ${CMAKE_OBJCOPY} --add-gnu-debuglink=_native.debug $<TARGET_FILE:_native>
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    VERBATIM)
   install(TARGETS _native LIBRARY DESTINATION pyhdiff COMPONENT python)
   install(FILES ${hdiff_dir}/LICENSE DESTINATION pyhdiff/licenses RENAME HDiffPatch.txt COMPONENT python)
   install(FILES ${zstd_SOURCE_DIR}/LICENSE DESTINATION pyhdiff/licenses RENAME zstd.txt COMPONENT python)

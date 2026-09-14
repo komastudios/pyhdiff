@@ -53,23 +53,26 @@ typedef struct {
 phd_result phd_hdiff_encode(const unsigned char *base, size_t base_size,
                             const unsigned char *target, size_t target_size,
                             const phd_hdiff_options *) PHD_NOEXCEPT;
-/* The result has exactly target_size bytes, or the call fails. */
-phd_result phd_hdiff_apply(const unsigned char *base, size_t base_size,
+/* Writes exactly target_size bytes to out, or fails. out may hold partial
+ * output after a failure. */
+phd_status phd_hdiff_apply(const unsigned char *base, size_t base_size,
                            const unsigned char *payload, size_t payload_size,
-                           size_t target_size) PHD_NOEXCEPT;
+                           unsigned char *out, size_t target_size) PHD_NOEXCEPT;
 phd_result phd_zstd_encode(const unsigned char *base, size_t base_size,
                            const unsigned char *target, size_t target_size,
                            const phd_zstd_options *) PHD_NOEXCEPT;
-/* Exactly one frame with a window of at most 2^30 bytes, and nothing else. */
-phd_result phd_zstd_apply(const unsigned char *base, size_t base_size,
+/* As phd_hdiff_apply, for exactly one frame with a window of at most 2^30
+ * bytes and nothing after it. */
+phd_status phd_zstd_apply(const unsigned char *base, size_t base_size,
                           const unsigned char *payload, size_t payload_size,
-                          size_t target_size) PHD_NOEXCEPT;
+                          unsigned char *out, size_t target_size) PHD_NOEXCEPT;
 /* Standard zstd frames without a base. window_log 0 selects the level
  * default. The frame records the content size. */
 phd_result phd_zstd_compress(const unsigned char *data, size_t size, int level,
                              int window_log, int checksum) PHD_NOEXCEPT;
 /* Decodes one or more concatenated frames, skippable frames included. Fails
- * with PHD_LIMIT as soon as the output would exceed max_output. */
+ * with PHD_LIMIT as soon as the output would exceed max_output. Windows above
+ * max(8 MiB, max_output rounded up to a power of two) are refused. */
 phd_result phd_zstd_decompress(const unsigned char *data, size_t size,
                                size_t max_output) PHD_NOEXCEPT;
 #ifdef PHD_TEST
@@ -79,9 +82,9 @@ phd_result phd_test_zstd_encode(const unsigned char *, size_t,
                                 const unsigned char *, size_t,
                                 const phd_zstd_options *, phd_test_callback,
                                 void *) PHD_NOEXCEPT;
-phd_result phd_test_zstd_apply(const unsigned char *, size_t,
-                               const unsigned char *, size_t, size_t,
-                               phd_test_callback, void *) PHD_NOEXCEPT;
+phd_status phd_test_zstd_apply(const unsigned char *, size_t,
+                               const unsigned char *, size_t, unsigned char *,
+                               size_t, phd_test_callback, void *) PHD_NOEXCEPT;
 phd_result phd_test_hdiff_wiring(void) PHD_NOEXCEPT;
 phd_result phd_test_zstd_allocation(void) PHD_NOEXCEPT;
 phd_result phd_test_exception(int) PHD_NOEXCEPT;

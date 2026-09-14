@@ -110,8 +110,12 @@ standard zstd frame. The frame records its content size and, by default, a
 checksum. `decompress(data, max_output_bytes)` accepts concatenated and
 skippable frames. The output bound is required and hard: `LimitError` is
 raised as soon as the output would exceed it, whatever size the frame header
-claims. The decoder also refuses windows larger than the bound requires,
-beyond the 128 MiB that ordinary levels use. The frames interoperate with
+claims. A frame header's content size only reserves address space; memory
+is committed as data actually decodes, so a forged header costs nothing. The
+decoder refuses windows larger than the bound rounded up to a power of two,
+except that 8 MiB windows, which streaming compressors use by default, are
+always accepted. Decoding a frame therefore needs at most about the bound plus
+its window in memory. The frames interoperate with
 the `zstd` command-line tool and other zstd bindings. Legacy pre-1.0 formats
 are not decoded.
 
@@ -248,7 +252,15 @@ Hardening in the shipped extension:
   unsafe-buffer and lifetime diagnostics as errors.
 - Linking uses full RELRO, immediate binding and a non-executable stack. All
   symbols are hidden except `PyInit__native`, unreferenced sections are
-  discarded, and the binary is stripped.
+  discarded, and the binary is stripped. The libc++abi terminate handler does
+  not demangle, which drops the demangler from the binary.
+- The private libc++ resolves entirely inside the extension. A test loads a
+  libstdc++ module globally before and after pyhdiff and throws through both
+  runtimes.
+
+Each release also publishes `pyhdiff-X.Y.Z-….debug`, the debug information
+stripped from the extension, matched to it by GNU build ID and debuglink. It
+is reproducible like the wheel and only needed to symbolize a crash.
 
 ## Pinned sources
 

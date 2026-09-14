@@ -42,16 +42,12 @@ static int tail_view(PyObject *object, Py_ssize_t offset, view *out) {
     return 1;
 }
 
+static PyObject *raise_status(phd_status status);
+
 static PyObject *finish(phd_result result) {
     PyObject *bytes;
-    if (result.status != PHD_OK) {
-        PyObject *code = PyLong_FromLong((long)result.status);
-        if (code) {
-            PyErr_SetObject(native_error, code);
-            Py_DECREF(code);
-        }
-        return NULL;
-    }
+    if (result.status != PHD_OK)
+        return raise_status(result.status);
     bytes = PyBytes_FromStringAndSize((const char *)result.data,
                                       (Py_ssize_t)result.size);
     free(result.data);
@@ -95,28 +91,50 @@ static PyObject *zstd_encode(PyObject *self, PyObject *args) {
     return finish(result);
 }
 
+static PyObject *raise_status(phd_status status) {
+    PyObject *code = PyLong_FromLong((long)status);
+    if (code) {
+        PyErr_SetObject(native_error, code);
+        Py_DECREF(code);
+    }
+    return NULL;
+}
+
+/* The target size is known, so decode straight into a new bytes object that
+ * no other code can see until it is complete. */
 static PyObject *apply(PyObject *args, int zstd) {
-    PyObject *base_object, *payload_object;
+    PyObject *base_object, *payload_object, *target;
     Py_ssize_t offset, target_size;
     view base, payload;
-    phd_result result;
+    phd_status status;
+    unsigned char *out;
     if (!PyArg_ParseTuple(args, "O!O!nn", &PyBytes_Type, &base_object,
                           &PyBytes_Type, &payload_object, &offset,
                           &target_size) ||
         !bytes_view(base_object, &base) ||
         !tail_view(payload_object, offset, &payload))
         return NULL;
-    if (target_size < 0) {
-        PyErr_SetString(PyExc_ValueError, "negative target size");
+    if (target_size < 0 || (size_t)target_size > PHD_RAW_MAX)
+        return raise_status(PHD_LIMIT);
+    target = PyBytes_FromStringAndSize(NULL, target_size);
+    if (!target)
+        return NULL;
+    out = (unsigned char *)PyBytes_AsString(target);
+    if (!out) {
+        Py_DECREF(target);
         return NULL;
     }
     Py_BEGIN_ALLOW_THREADS
-    result = zstd ? phd_zstd_apply(base.data, base.size, payload.data,
-                                   payload.size, (size_t)target_size)
+    status = zstd ? phd_zstd_apply(base.data, base.size, payload.data,
+                                   payload.size, out, (size_t)target_size)
                   : phd_hdiff_apply(base.data, base.size, payload.data,
-                                    payload.size, (size_t)target_size);
+                                    payload.size, out, (size_t)target_size);
     Py_END_ALLOW_THREADS
-    return finish(result);
+    if (status != PHD_OK) {
+        Py_DECREF(target);
+        return raise_status(status);
+    }
+    return target;
 }
 
 static PyObject *hdiff_apply(PyObject *self, PyObject *args) {
