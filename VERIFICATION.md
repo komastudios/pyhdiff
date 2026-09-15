@@ -54,7 +54,7 @@ is synthetic.
 | zstd frames: levels 1–22, hard bound with and without content size, forged content size above and just below the bound (no memory committed), content size smaller and larger than the data, legacy magic, dictionary frames, exact bound followed by skippable and empty frames, concatenation, corruption, zstd CLI interoperability in both directions | `test_frames.py` |
 | GIL released by every native entry point, checked deterministically without timing: with an effectively infinite switch interval a helper thread can only advance while the GIL is explicitly released; a control confirms a GIL-holding C call leaves it exactly unchanged | `test_gil.py` |
 | Parallel encodes from eight threads equal serial results | `test_concurrency.py` |
-| Every earlier release's golden corpus applies | `test_golden.py` |
+| Every earlier release's golden corpus applies; the corpus inputs encode to exactly the newest release's envelope and frame bytes | `test_golden.py` |
 
 ## Beyond CI
 

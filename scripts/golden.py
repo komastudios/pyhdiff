@@ -47,21 +47,12 @@ def inputs():
     return files
 
 
-def generate(out):
+def encode_corpus():
+    """Yield (name, kind, base_file, target_file, blob) for every corpus entry."""
     import pyhdiff
 
     manifest = json.loads((VECTORS / "manifest.json").read_text())
     files = inputs()
-    out.mkdir(parents=True, exist_ok=True)
-    entries = []
-
-    def record(name, kind, base_file, target_file, blob):
-        (out / name).write_bytes(blob)
-        entries.append({"name": name.rsplit(".", 1)[0], "kind": kind, "blob": name,
-                        "blob_sha256": sha256(blob), "base_file": base_file,
-                        "target_file": target_file,
-                        "target_sha256": sha256(files[target_file])})
-
     for pair in PAIRS:
         base_file, target_file = f"{pair}.base", f"{pair}.target"
         base, target = files[base_file], files[target_file]
@@ -78,11 +69,25 @@ def generate(out):
             else:
                 blob = pyhdiff.encode_delta(base, target, pyhdiff.ZstdProfile(level=level, **params))
                 used_base = base_file
-            record(f"{pair}.{name}.phdf", "envelope", used_base, target_file, blob)
+            yield f"{pair}.{name}.phdf", "envelope", used_base, target_file, blob
         if pair.startswith("medium"):
             for level in FRAME_LEVELS:
-                record(f"{pair}.compress-{level}.zst", "frame", "", target_file,
+                yield (f"{pair}.compress-{level}.zst", "frame", "", target_file,
                        pyhdiff.compress(target, level))
+
+
+def generate(out):
+    import pyhdiff
+
+    files = inputs()
+    out.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for name, kind, base_file, target_file, blob in encode_corpus():
+        (out / name).write_bytes(blob)
+        entries.append({"name": name.rsplit(".", 1)[0], "kind": kind, "blob": name,
+                        "blob_sha256": sha256(blob), "base_file": base_file,
+                        "target_file": target_file,
+                        "target_sha256": sha256(files[target_file])})
     (out / "manifest.json").write_text(json.dumps({
         "pyhdiff_version": pyhdiff.__version__,
         "format_version": pyhdiff.FORMAT_VERSION,

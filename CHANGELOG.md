@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- CI checks encoding identity as well as decoding: the golden corpus inputs
+  must encode to exactly the bytes of the newest release's corpus.
+
 ## [0.1.1]
 
 - A native allocation failure raises `pyhdiff.AllocationError`, a subclass of

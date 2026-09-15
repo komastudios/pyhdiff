@@ -25,7 +25,8 @@ commit. Nothing publishes automatically from `main`.
 
 The workflow refuses to publish if the tag and `pyproject.toml` disagree, if
 an earlier release's golden corpus is missing, if any test fails (including
-applying every earlier corpus), or if two independent builds of the wheel
+applying every earlier corpus and encoding the corpus inputs to the newest
+earlier release's bytes), or if two independent builds of the wheel
 differ. There is no override: fix the cause and tag a new version.
 
 After publishing, import and commit the new release's corpus (step 1), so that

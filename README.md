@@ -218,9 +218,11 @@ bytes. This holds for ever, across all future versions.
 - `apply`, `inspect`, `decompress`, `raw.hdiff_apply` and `raw.zstd_apply`
   keep reading every format version, codec and parameter combination that
   was ever emitted. Limits that decoding enforces never shrink.
-- Encoding may change between releases. A new release may emit different
-  bytes for the same input, for example after a codec upgrade, as long as
-  every earlier release's output still applies.
+- Encoding may change between releases, but only deliberately. A new release
+  may emit different bytes for the same input, for example after a codec
+  upgrade, as long as every earlier release's output still applies. Such a
+  change is stated in the changelog; without that statement, a release
+  encodes the corpus inputs to exactly the bytes of the release before it.
 - A format change bumps the format version. No release reuses a version
   number or magic for different content.
 
@@ -229,7 +231,10 @@ frames that the release's own wheel produced from fixed inputs. CI applies
 all of them at every commit. The release workflow refuses to run while any
 earlier release's corpus is missing. A build that cannot read an older entry
 fails its tests, and a failed test blocks the release, with no override.
-Corpus entries are never edited or deleted.
+CI also encodes the corpus inputs at every commit and requires the bytes of
+the newest release's corpus, so unchanged encoding is checked rather than
+asserted; a deliberate change has to edit that test and the changelog in the
+same commit. Corpus entries are never edited or deleted.
 
 **Reproducibility.** Release wheels are built twice, from scratch, in
 digest-pinned containers with hash-pinned tools, and the release fails

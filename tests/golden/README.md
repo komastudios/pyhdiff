@@ -2,7 +2,8 @@
 
 One directory per released tag, holding the envelopes and zstd frames that
 release produced from the inputs in `tests/vectors`. `tests/test_golden.py`
-applies every one of them with the code under test. A release cannot be cut
+applies every one of them with the code under test, and encodes the same
+inputs to check that they produce exactly the newest release's bytes. A release cannot be cut
 while an earlier tag's directory is missing, and a release whose build cannot
 read an older entry fails. Entries are never edited or removed.
 
