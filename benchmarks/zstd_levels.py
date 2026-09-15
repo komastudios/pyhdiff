@@ -6,9 +6,9 @@
 The payload is JSON-like records with the redundancy of a typical structured
 snapshot: sequential keys, a few enumerated fields, values drawn from small
 pools. It compresses about 10x at level 3 and 17x at level 19, so the level curve has the shape
-seen on real structured data of this size. Timings are single-threaded wall
-clock on the machine running the script; measure on your own hardware before
-choosing a level.
+seen on structured data of this size. Timings are single-threaded wall clock
+on the machine running the script. At level 15 and above they also depend on
+the data's structure, so time your own data before choosing a level.
 """
 
 import argparse

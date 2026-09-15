@@ -56,6 +56,14 @@ is synthetic.
 | Parallel encodes from eight threads equal serial results | `test_concurrency.py` |
 | Every earlier release's golden corpus applies | `test_golden.py` |
 
+## Beyond CI
+
+Before v0.1.0 was cleared for use, its published wheel was also compared with
+the reference encoder on a private corpus of real inputs of about 200 MiB, on
+the four delta profiles and `encode_base`. All 30 envelopes were byte-identical
+in bytes 4..end, and each applied to its target. The inputs are not public, so
+this check is recorded here but not repeated in CI.
+
 ## Reproducibility
 
 `scripts/wheel.py` builds without build isolation from hash-pinned tools in a

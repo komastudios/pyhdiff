@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.1.1]
 
 - A native allocation failure raises `pyhdiff.AllocationError`, a subclass of
   both `pyhdiff.Error` and `MemoryError`, instead of a plain `MemoryError`, so

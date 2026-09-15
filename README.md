@@ -148,8 +148,12 @@ other work, so treat the timings as a shape rather than a specification:
 | 15 | 13.8 MiB | 14.3 | 27.5 s | 0.86 s |
 | 19 | 11.2 MiB | 17.7 | 287.3 s | 0.92 s |
 
-Measure on the target hardware with `python benchmarks/zstd_levels.py`
-before fixing a level. Envelope `ZstdProfile` levels follow the same curve.
+Encode time at level 15 and above depends strongly on the structure of the
+data, not only on its size and compression ratio. The strongest levels' match
+search can run several times faster or slower on inputs with the same ratio.
+Treat the table as the shape of the curve. Before fixing a level, time
+`pyhdiff.compress` on representative samples of your own data on the target
+hardware. Envelope `ZstdProfile` levels follow the same curve.
 
 ### Raw payloads
 
